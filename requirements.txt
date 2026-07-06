@@ -1,0 +1,3 @@
+dbt-core==1.10.22
+dbt-duckdb==1.10.0
+dbt-colibri==0.3.6

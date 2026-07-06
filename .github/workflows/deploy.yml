@@ -18,6 +18,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      JAFFLESHOP_DUCKDB_PATH: jaffleshop.duckdb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,12 +34,25 @@ jobs:
  
       - name: Install dependencies
         run: uv pip install -r requirements.txt --system
+
+      - name: Create CI dbt profile
+        run: |
+          mkdir -p ./.ci
+          cat > ./.ci/profiles.yml <<'EOF'
+          jaffleshop:
+            outputs:
+              ci:
+                type: duckdb
+                path: "{{ env_var('JAFFLESHOP_DUCKDB_PATH', 'jaffleshop.duckdb') }}"
+                threads: 4
+            target: ci
+          EOF
  
       - name: Initialize dbt
         run: |
-          dbt deps
-          dbt compile # Note that dbt run / dbt build also generates the manifest incl. compiled sql code
-          dbt docs generate
+          dbt deps --profiles-dir ./.ci
+          dbt compile --profiles-dir ./.ci # dbt run / dbt build also generates manifest + compiled SQL
+          dbt docs generate --profiles-dir ./.ci
  
       - name: Run Colibri
         run: colibri generate
