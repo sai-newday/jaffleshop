@@ -1,0 +1,31 @@
+name: "jaffleshop"
+version: "1.0.0"
+config-version: 2
+
+profile: "jaffleshop"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  jaffleshop:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+    public:
+      +materialized: view
+
+
+seeds:
+  jaffleshop:
+    +quote_columns: false

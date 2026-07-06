@@ -1,0 +1,9 @@
+id,orderid,paymentmethod,status,amount,created
+1,1,credit_card,success,1000,2018-01-01
+2,2,coupon,success,2500,2018-01-02
+3,3,credit_card,success,3000,2018-01-04
+4,4,gift_card,success,1500,2018-01-05
+5,5,bank_transfer,success,3200,2018-01-05
+6,6,credit_card,success,2800,2018-01-07
+7,7,credit_card,success,4100,2018-01-09
+8,8,coupon,success,500,2018-01-11

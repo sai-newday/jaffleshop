@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: public_customers
+    description: Public contract model for downstream dbt projects.
+    config:
+      access: public
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+          - unique
+
+  - name: public_orders
+    description: Public order-level contract model for downstream dbt projects.
+    config:
+      access: public
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+
+  - name: public_daily_revenue
+    description: Public daily revenue aggregate contract model for downstream dbt projects.
+    config:
+      access: public
+    columns:
+      - name: order_date
+        tests:
+          - not_null
+          - unique
+
+  - name: public_order_status_summary
+    description: Public order status aggregate contract model for downstream dbt projects.
+    config:
+      access: public
+    columns:
+      - name: status
+        tests:
+          - not_null
+          - unique

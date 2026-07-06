@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+
+  - name: daily_revenue
+    columns:
+      - name: order_date
+        tests:
+          - unique
+          - not_null
+
+  - name: order_status_summary
+    columns:
+      - name: status
+        tests:
+          - unique
+          - not_null
