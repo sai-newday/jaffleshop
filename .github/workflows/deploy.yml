@@ -52,6 +52,7 @@ jobs:
         run: |
           dbt deps --profiles-dir ./.ci
           dbt compile --profiles-dir ./.ci 
+          dbt seed --profiles-dir ./.ci
           dbt run --profiles-dir ./.ci
           dbt docs generate --profiles-dir ./.ci
  
