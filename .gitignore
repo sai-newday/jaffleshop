@@ -4,4 +4,5 @@ logs/
 dbt_packages/
 jaffleshop.duckdb
 .dbt/
+.github/
 
