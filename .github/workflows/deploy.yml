@@ -51,7 +51,8 @@ jobs:
       - name: Initialize dbt
         run: |
           dbt deps --profiles-dir ./.ci
-          dbt compile --profiles-dir ./.ci # dbt run / dbt build also generates manifest + compiled SQL
+          dbt compile --profiles-dir ./.ci # 
+          dbt run --profiles-dir ./.ci
           dbt docs generate --profiles-dir ./.ci
  
       - name: Run Colibri
