@@ -5,4 +5,7 @@ dbt_packages/
 jaffleshop.duckdb
 .dbt/
 .github/
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 
