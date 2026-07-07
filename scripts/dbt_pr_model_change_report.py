@@ -442,6 +442,22 @@ def _extract_impact_details(payload: Optional[dict]) -> Tuple[List[str], List[st
     impacted_models: Set[str] = set()
     impacted_columns: Set[str] = set()
 
+    affected_items = payload.get("affected_items")
+    if isinstance(affected_items, list):
+        for item in affected_items:
+            if not isinstance(item, dict):
+                continue
+
+            model_name = item.get("model")
+            if isinstance(model_name, str) and model_name.strip():
+                impacted_models.add(model_name.strip())
+
+            columns = item.get("columns")
+            if isinstance(columns, list):
+                for column_name in columns:
+                    if isinstance(column_name, str) and column_name.strip():
+                        impacted_columns.add(column_name.strip())
+
     dict_lists: List[List[dict]] = []
     _collect_dict_lists(payload, dict_lists)
 
