@@ -8,4 +8,3 @@ select
     lifetime_value,
     number_of_orders
 from {{ ref('public_customers') }}
-
