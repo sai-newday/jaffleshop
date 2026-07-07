@@ -4,8 +4,8 @@
 This script compares base/head revisions for changed model SQL files, classifies
 whether each model changed in SELECT columns, non-column SQL, or both.
 
-It also runs `colibri blast-radius` in text mode for model-level and/or
-model+column-level impact and posts the raw CLI output in the PR comment.
+It also runs `colibri blast-radius` in JSON mode for model-level and/or
+model+column-level impact and posts a concise, reviewer-friendly impact summary.
 """
 
 from __future__ import annotations
@@ -60,7 +60,8 @@ class BlastRadiusResult:
     mode: str
     columns: List[str]
     command: List[str]
-    output_text: str
+    output_json: str
+    parsed_json: Optional[dict]
     success: bool
     error_text: str
 
@@ -352,13 +353,24 @@ def run_blast_radius(
         "--catalog",
         blast_catalog_path,
         "--format",
-        "text",
+        "json",
     ]
 
     if request_item.mode == "columns" and request_item.columns:
         command.extend(["--columns", ",".join(request_item.columns)])
 
     exit_code, stdout, stderr = run_command(command)
+    parsed: Optional[dict] = None
+    if exit_code == 0 and stdout.strip():
+        try:
+            loaded = json.loads(stdout)
+            if isinstance(loaded, dict):
+                parsed = loaded
+            else:
+                parsed = {"result": loaded}
+        except json.JSONDecodeError:
+            parsed = None
+
     return BlastRadiusResult(
         request_key=request_item.request_key,
         file_path=request_item.file_path,
@@ -367,10 +379,111 @@ def run_blast_radius(
         mode=request_item.mode,
         columns=request_item.columns,
         command=command,
-        output_text=stdout,
+        output_json=stdout,
+        parsed_json=parsed,
         success=exit_code == 0,
         error_text=stderr.strip(),
     )
+
+
+def _collect_dict_lists(payload: object, out: List[List[dict]]) -> None:
+    if isinstance(payload, dict):
+        for value in payload.values():
+            _collect_dict_lists(value, out)
+    elif isinstance(payload, list):
+        if payload and all(isinstance(x, dict) for x in payload):
+            out.append(payload)
+        for value in payload:
+            _collect_dict_lists(value, out)
+
+
+def _extract_summary_counts(payload: Optional[dict]) -> Tuple[Optional[int], Optional[int]]:
+    if not payload:
+        return None, None
+
+    impacted_models: Set[str] = set()
+    impacted_columns: Set[str] = set()
+
+    dict_lists: List[List[dict]] = []
+    _collect_dict_lists(payload, dict_lists)
+
+    for items in dict_lists:
+        for item in items:
+            model_candidate = (
+                item.get("unique_id")
+                or item.get("model")
+                or item.get("model_name")
+                or item.get("node")
+                or item.get("name")
+            )
+            if isinstance(model_candidate, str) and model_candidate.strip():
+                impacted_models.add(model_candidate.strip())
+
+            column_candidate = (
+                item.get("column")
+                or item.get("column_name")
+                or item.get("target_column")
+                or item.get("source_column")
+            )
+            if isinstance(column_candidate, str) and column_candidate.strip():
+                impacted_columns.add(column_candidate.strip())
+
+    top_model_keys = [
+        "impacted_models",
+        "downstream_models",
+        "models",
+        "downstream_nodes",
+    ]
+    for key in top_model_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            for x in value:
+                if isinstance(x, str) and x.strip():
+                    impacted_models.add(x.strip())
+                elif isinstance(x, dict):
+                    name = x.get("unique_id") or x.get("name") or x.get("model")
+                    if isinstance(name, str) and name.strip():
+                        impacted_models.add(name.strip())
+
+    top_col_keys = ["impacted_columns", "downstream_columns", "columns"]
+    for key in top_col_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            for x in value:
+                if isinstance(x, str) and x.strip():
+                    impacted_columns.add(x.strip())
+                elif isinstance(x, dict):
+                    name = x.get("name") or x.get("column") or x.get("column_name")
+                    if isinstance(name, str) and name.strip():
+                        impacted_columns.add(name.strip())
+
+    model_count = len(impacted_models) if impacted_models else None
+    column_count = len(impacted_columns) if impacted_columns else None
+    return model_count, column_count
+
+
+def build_impact_assessment_line(blast: BlastRadiusResult) -> str:
+    if not blast.success:
+        return "Impact assessment unavailable: blast-radius command failed."
+
+    if blast.parsed_json is None:
+        return "Impact assessment unavailable: blast-radius did not return valid JSON."
+
+    model_count, column_count = _extract_summary_counts(blast.parsed_json)
+
+    parts: List[str] = []
+    if model_count is not None:
+        parts.append(f"{model_count} downstream model(s)")
+    if column_count is not None:
+        parts.append(f"{column_count} downstream column(s)")
+
+    if parts:
+        return "Potential impact detected on " + " and ".join(parts) + "."
+
+    if blast.parsed_json:
+        return "Blast-radius returned JSON, but no downstream entities were detected in known fields."
+
+    return "No downstream impact reported."
 
 
 def analyze_model_change(
@@ -483,36 +596,18 @@ def build_comment(
 
         related_blast = blast_by_file.get(item.file_path, [])
         if related_blast:
-            lines.append("- Downstream impact (from colibri blast-radius):")
+            lines.append("- Impact assessment (from colibri blast-radius JSON):")
             for blast in related_blast:
                 column_info = f" | Columns: {', '.join(blast.columns)}" if blast.columns else ""
                 lines.append(f"  - Mode: `{blast.mode}`{column_info}")
-                lines.append("<details>")
-                lines.append("<summary>Blast Radius Text Output (raw CLI output)</summary>")
-                lines.append("")
-                lines.append("```text")
-                # Keep CLI text output unchanged.
-                lines.append(blast.output_text if blast.output_text else "")
-                lines.append("```")
                 if not blast.success:
-                    lines.append("")
-                    lines.append("```text")
-                    lines.append(f"Command failed: {' '.join(blast.command)}")
+                    lines.append("  - Result: Command failed")
                     if blast.error_text:
-                        lines.append(blast.error_text)
-                    lines.append("```")
-                lines.append("</details>")
+                        lines.append(f"  - Error: {blast.error_text}")
+                else:
+                    lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
         else:
             lines.append("- Downstream impact: (not executed)")
-
-        node_json = json.dumps(item.node, indent=2, sort_keys=True)
-        lines.append("<details>")
-        lines.append("<summary>Node details</summary>")
-        lines.append("")
-        lines.append("```json")
-        lines.append(node_json)
-        lines.append("```")
-        lines.append("</details>")
         lines.append("")
 
     return "\n".join(lines)
