@@ -16,6 +16,9 @@ jobs:
   analyze-dbt-model-changes:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    env:
+      COLIBRI_REPO_URL: https://github.com/sai-newday/dbt-colibri.git
+      COLIBRI_REF: main
 
     steps:
       - name: Checkout
@@ -32,6 +35,35 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Prepare dbt-colibri and merged artifacts
+        run: |
+          set -euo pipefail
+
+          COLIBRI_DIR="${RUNNER_TEMP}/dbt-colibri"
+          git clone --depth 1 --branch "${COLIBRI_REF}" "${COLIBRI_REPO_URL}" "${COLIBRI_DIR}"
+
+          BLAST_MANIFEST_PATH="${COLIBRI_DIR}/combined-lineage/dist/_merged_artifacts/manifest.json"
+          BLAST_CATALOG_PATH="${COLIBRI_DIR}/combined-lineage/dist/_merged_artifacts/catalog.json"
+
+          if [ ! -f "${BLAST_MANIFEST_PATH}" ]; then
+            echo "Blast manifest missing: ${BLAST_MANIFEST_PATH}"
+            exit 1
+          fi
+
+          if [ ! -f "${BLAST_CATALOG_PATH}" ]; then
+            echo "Blast catalog missing: ${BLAST_CATALOG_PATH}"
+            exit 1
+          fi
+
+          echo "COLIBRI_DIR=${COLIBRI_DIR}" >> "$GITHUB_ENV"
+          echo "BLAST_MANIFEST_PATH=${BLAST_MANIFEST_PATH}" >> "$GITHUB_ENV"
+          echo "BLAST_CATALOG_PATH=${BLAST_CATALOG_PATH}" >> "$GITHUB_ENV"
+
+      - name: Install dbt-colibri from GitHub clone
+        run: |
+          set -euo pipefail
+          pip install "$COLIBRI_DIR"
 
       - name: Create CI dbt profile
         run: |
@@ -59,4 +91,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           MANIFEST_PATH: target/manifest.json
+          BLAST_MANIFEST_PATH: ${{ env.BLAST_MANIFEST_PATH }}
+          BLAST_CATALOG_PATH: ${{ env.BLAST_CATALOG_PATH }}
+          COLIBRI_CMD: colibri
         run: python scripts/dbt_pr_model_change_report.py
