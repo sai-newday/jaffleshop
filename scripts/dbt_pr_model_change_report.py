@@ -2,8 +2,10 @@
 """Analyze changed dbt model SQL files in a PR and post a GitHub comment.
 
 This script compares base/head revisions for changed model SQL files, classifies
-whether each model changed in SELECT columns, non-column SQL, or both, and
-includes dbt node metadata from target/manifest.json.
+whether each model changed in SELECT columns, non-column SQL, or both.
+
+It also runs `colibri blast-radius` in text mode for model-level and/or
+model+column-level impact and posts the raw CLI output in the PR comment.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
 COMMENT_MARKER = "<!-- dbt-model-change-report -->"
@@ -39,6 +41,30 @@ class ModelAnalysis:
     node: dict
 
 
+@dataclass
+class BlastRadiusRequest:
+    request_key: str
+    file_path: str
+    model_name: str
+    model_unique_id: str
+    mode: str
+    columns: List[str]
+
+
+@dataclass
+class BlastRadiusResult:
+    request_key: str
+    file_path: str
+    model_name: str
+    model_unique_id: str
+    mode: str
+    columns: List[str]
+    command: List[str]
+    output_text: str
+    success: bool
+    error_text: str
+
+
 def run_git(args: List[str]) -> str:
     result = subprocess.run(
         ["git"] + args,
@@ -49,6 +75,16 @@ def run_git(args: List[str]) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def run_command(args: List[str]) -> Tuple[int, str, str]:
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
 
 
 def read_git_file(rev: str, file_path: str) -> Optional[str]:
@@ -257,6 +293,86 @@ def map_file_to_node(manifest: dict, file_path: str) -> Tuple[str, dict]:
     }
 
 
+def build_blast_radius_requests(analyses: List[ModelAnalysis]) -> List[BlastRadiusRequest]:
+    requests: List[BlastRadiusRequest] = []
+    seen_keys: Set[str] = set()
+
+    for item in analyses:
+        changed_columns = sorted(set(item.added_columns + item.removed_columns + item.modified_columns))
+        key_prefix = f"{item.file_path}|{item.unique_id}"
+
+        def add_request(mode: str, columns: Optional[List[str]] = None) -> None:
+            cols = columns or []
+            cols_key = ",".join(cols)
+            key = f"{key_prefix}|{mode}|{cols_key}"
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            requests.append(
+                BlastRadiusRequest(
+                    request_key=key,
+                    file_path=item.file_path,
+                    model_name=item.model_name,
+                    model_unique_id=item.unique_id,
+                    mode=mode,
+                    columns=cols,
+                )
+            )
+
+        if item.change_type == "columns_only":
+            if changed_columns:
+                add_request("columns", changed_columns)
+            else:
+                add_request("model")
+        elif item.change_type == "other_sql_only":
+            add_request("model")
+        elif item.change_type == "both (columns + other SQL)":
+            add_request("model")
+            if changed_columns:
+                add_request("columns", changed_columns)
+        else:
+            add_request("model")
+
+    return requests
+
+
+def run_blast_radius(
+    request_item: BlastRadiusRequest,
+    colibri_cmd: str,
+    blast_manifest_path: str,
+    blast_catalog_path: str,
+) -> BlastRadiusResult:
+    command = [
+        colibri_cmd,
+        "blast-radius",
+        "--model",
+        request_item.model_unique_id,
+        "--manifest",
+        blast_manifest_path,
+        "--catalog",
+        blast_catalog_path,
+        "--format",
+        "text",
+    ]
+
+    if request_item.mode == "columns" and request_item.columns:
+        command.extend(["--columns", ",".join(request_item.columns)])
+
+    exit_code, stdout, stderr = run_command(command)
+    return BlastRadiusResult(
+        request_key=request_item.request_key,
+        file_path=request_item.file_path,
+        model_name=request_item.model_name,
+        model_unique_id=request_item.model_unique_id,
+        mode=request_item.mode,
+        columns=request_item.columns,
+        command=command,
+        output_text=stdout,
+        success=exit_code == 0,
+        error_text=stderr.strip(),
+    )
+
+
 def analyze_model_change(
     file_path: str,
     base_sql: Optional[str],
@@ -318,13 +434,22 @@ def analyze_model_change(
     )
 
 
-def build_comment(analyses: List[ModelAnalysis], changed_files: List[str]) -> str:
+def build_comment(
+    analyses: List[ModelAnalysis],
+    changed_files: List[str],
+    blast_results: List[BlastRadiusResult],
+) -> str:
+    blast_by_file: Dict[str, List[BlastRadiusResult]] = {}
+    for result in blast_results:
+        blast_by_file.setdefault(result.file_path, []).append(result)
+
     lines: List[str] = [
         COMMENT_MARKER,
-        "## dbt Model Change Report",
+        "## dbt Downstream Impact Report",
         "",
         f"Changed files in PR: {len(changed_files)}",
         f"Changed dbt model SQL files: {len(analyses)}",
+        f"Blast radius requests executed: {len(blast_results)}",
         "",
     ]
 
@@ -355,6 +480,30 @@ def build_comment(analyses: List[ModelAnalysis], changed_files: List[str]) -> st
             )
         else:
             lines.append("- Column changes: (none detected)")
+
+        related_blast = blast_by_file.get(item.file_path, [])
+        if related_blast:
+            lines.append("- Downstream impact (from colibri blast-radius):")
+            for blast in related_blast:
+                column_info = f" | Columns: {', '.join(blast.columns)}" if blast.columns else ""
+                lines.append(f"  - Mode: `{blast.mode}`{column_info}")
+                lines.append("<details>")
+                lines.append("<summary>Blast Radius Text Output (raw CLI output)</summary>")
+                lines.append("")
+                lines.append("```text")
+                # Keep CLI text output unchanged.
+                lines.append(blast.output_text if blast.output_text else "")
+                lines.append("```")
+                if not blast.success:
+                    lines.append("")
+                    lines.append("```text")
+                    lines.append(f"Command failed: {' '.join(blast.command)}")
+                    if blast.error_text:
+                        lines.append(blast.error_text)
+                    lines.append("```")
+                lines.append("</details>")
+        else:
+            lines.append("- Downstream impact: (not executed)")
 
         node_json = json.dumps(item.node, indent=2, sort_keys=True)
         lines.append("<details>")
@@ -425,6 +574,17 @@ def main() -> int:
         print(f"Manifest not found: {manifest_path}", file=sys.stderr)
         return 2
 
+    colibri_cmd = os.environ.get("COLIBRI_CMD", "colibri")
+    blast_manifest_path = os.environ.get("BLAST_MANIFEST_PATH")
+    blast_catalog_path = os.environ.get("BLAST_CATALOG_PATH")
+
+    if not blast_manifest_path or not os.path.exists(blast_manifest_path):
+        print(f"Blast manifest not found: {blast_manifest_path}", file=sys.stderr)
+        return 2
+    if not blast_catalog_path or not os.path.exists(blast_catalog_path):
+        print(f"Blast catalog not found: {blast_catalog_path}", file=sys.stderr)
+        return 2
+
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
@@ -442,13 +602,22 @@ def main() -> int:
         node_info = map_file_to_node(manifest, model_file)
         analyses.append(analyze_model_change(model_file, base_sql, head_sql, diff_text, node_info))
 
-    body = build_comment(analyses, changed_files)
+    blast_requests = build_blast_radius_requests(analyses)
+    blast_results = [
+        run_blast_radius(req, colibri_cmd, blast_manifest_path, blast_catalog_path)
+        for req in blast_requests
+    ]
+
+    body = build_comment(analyses, changed_files, blast_results)
     upsert_pr_comment(repository, pr_number, body, token)
 
     summary = {
         "changed_files": len(changed_files),
         "changed_model_files": len(model_files),
         "analyzed_models": len(analyses),
+        "blast_radius_requests": len(blast_requests),
+        "blast_radius_success": sum(1 for x in blast_results if x.success),
+        "blast_radius_failed": sum(1 for x in blast_results if not x.success),
     }
     print(json.dumps(summary, indent=2))
     return 0
