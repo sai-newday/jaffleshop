@@ -586,7 +586,7 @@ def build_impact_assessment_line(blast: BlastRadiusResult) -> str:
 
 def _lineage_url(unique_id: str, column: Optional[str] = None) -> str:
     """Build a deep-link URL to the local Colibri lineage viewer for a model."""
-    params = f"?model={unique_id}"
+    params = f"?model={unique_id}&children=all&parents=all"
     if column:
         params += f"&column={column}&focus=true"
     return f"{LINEAGE_BASE_URL}{params}"
