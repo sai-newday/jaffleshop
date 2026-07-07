@@ -753,40 +753,37 @@ def build_comment(
 
         if item.added_columns or item.removed_columns or item.modified_columns:
             lines.append("- Column changes:")
-            lines.append(
-                f"  - Added: {', '.join(item.added_columns) if item.added_columns else '(none)'}"
-            )
-            lines.append(
-                f"  - Removed: {', '.join(item.removed_columns) if item.removed_columns else '(none)'}"
-            )
-            lines.append(
-                f"  - Modified: {', '.join(item.modified_columns) if item.modified_columns else '(none)'}"
-            )
+            if item.added_columns:
+                lines.append(f"  - Added: {', '.join(item.added_columns)}")
+            if item.removed_columns:
+                lines.append(f"  - Removed: {', '.join(item.removed_columns)}")
+            if item.modified_columns:
+                lines.append(f"  - Modified: {', '.join(item.modified_columns)}")
         else:
             lines.append("- Column changes: (none detected)")
         if related_blast:
             lines.append("- Downstream impact details:")
             for blast in related_blast:
-                column_info = f" | Columns: {', '.join(blast.columns)}" if blast.columns else ""
-                lines.append(f"  - Mode: `{blast.mode}`{column_info}")
                 if not blast.success:
                     lines.append("  - Result: Command failed")
                     if blast.error_text:
                         lines.append(f"  - Error: {blast.error_text}")
                 else:
-                    lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
                     affected_items = _extract_affected_items(blast.parsed_json)
                     impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
                     lines.append("  - Downstream dbt impacts:")
                     if affected_items:
+                        lines.append("")
+                        lines.append("  | Project Name | Model Name | Columns Affected | Depth |")
+                        lines.append("  | :- | :- | :- | -: |")
                         for affected_item in affected_items:
-                            depth_text = f"depth {affected_item.depth}" if affected_item.depth is not None else "depth unknown"
-                            if affected_item.columns:
-                                lines.append(
-                                    f"    - {affected_item.model} ({depth_text}): {', '.join(affected_item.columns)}"
-                                )
-                            else:
-                                lines.append(f"    - {affected_item.model} ({depth_text})")
+                            depth_val = str(affected_item.depth) if affected_item.depth is not None else "unknown"
+                            id_parts = affected_item.model.split(".")
+                            project_name = id_parts[1] if len(id_parts) >= 3 else ""
+                            model_name = id_parts[2] if len(id_parts) >= 3 else affected_item.model
+                            columns_str = ", ".join(affected_item.columns) if affected_item.columns else ""
+                            lines.append(f"  | {project_name} | {model_name} | {columns_str} | {depth_val} |")
+                        lines.append("")
                     else:
                         if impacted_models:
                             lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
