@@ -4,4 +4,3 @@ select
     order_date,
     status
 from {{ source('jaffle_shop', 'raw_orders') }}
-
