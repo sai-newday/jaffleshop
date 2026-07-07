@@ -525,6 +525,17 @@ def _format_preview(values: List[str], max_items: int = 15) -> str:
     return f"{visible} (+{len(values) - max_items} more)"
 
 
+def _format_bullet_list(values: List[str], max_items: int = 20) -> List[str]:
+    if not values:
+        return ["- (none reported)"]
+    if len(values) <= max_items:
+        return [f"- {v}" for v in values]
+
+    lines = [f"- {v}" for v in values[:max_items]]
+    lines.append(f"- (+{len(values) - max_items} more)")
+    return lines
+
+
 def analyze_model_change(
     file_path: str,
     base_sql: Optional[str],
@@ -597,7 +608,9 @@ def build_comment(
 
     lines: List[str] = [
         COMMENT_MARKER,
-        "## dbt Downstream Impact Report",
+        "## dbt Column-Level Lineage Analysis",
+        "",
+        "⚠️ The changes in this PR may have downstream impact.",
         "",
         f"Changed files in PR: {len(changed_files)}",
         f"Changed dbt model SQL files: {len(analyses)}",
@@ -609,11 +622,34 @@ def build_comment(
         lines.append("No changes were detected in `models/**/*.sql` files.")
         return "\n".join(lines)
 
+    lines.append("| File changed | dbt nodes impacted | dbt columns impacted |")
+    lines.append("| :- | -: | -: |")
+
+    for item in analyses:
+        related_blast = blast_by_model.get(item.unique_id, [])
+        impacted_models: Set[str] = set()
+        impacted_columns: Set[str] = set()
+
+        for blast in related_blast:
+            if blast.success and blast.parsed_json is not None:
+                models, columns = _extract_impact_details(blast.parsed_json)
+                impacted_models.update(models)
+                impacted_columns.update(columns)
+
+        lines.append(
+            f"| {item.file_path} | **{len(impacted_models)}** | **{len(impacted_columns)}** |"
+        )
+
+    lines.append("")
+    lines.append("## Impact by Changed Files")
+    lines.append("Expand each changed file section below to review model and column blast radius details.")
+    lines.append("")
+
     for item in analyses:
         lines.extend(
             [
-                f"### {item.model_name}",
-                f"- Model file: `{item.file_path}`",
+                f"### {item.file_path}",
+                f"- Model: `{item.model_name}`",
                 f"- Model unique_id: `{item.unique_id}`",
                 f"- Type of change: **{item.change_type}**",
             ]
@@ -635,7 +671,7 @@ def build_comment(
 
         related_blast = blast_by_model.get(item.unique_id, [])
         if related_blast:
-            lines.append("- Impact assessment (from colibri blast-radius JSON):")
+            lines.append("- Downstream impact details:")
             for blast in related_blast:
                 column_info = f" | Columns: {', '.join(blast.columns)}" if blast.columns else ""
                 lines.append(f"  - Mode: `{blast.mode}`{column_info}")
@@ -646,8 +682,10 @@ def build_comment(
                 else:
                     lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
                     impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
-                    lines.append(f"  - Downstream models: {_format_preview(impacted_models)}")
-                    lines.append(f"  - Downstream columns: {_format_preview(impacted_columns)}")
+                    lines.append("  - Downstream dbt nodes impacted:")
+                    lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
+                    lines.append("  - Downstream dbt columns impacted:")
+                    lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
         else:
             lines.append("- Downstream impact: (not executed)")
         lines.append("")
