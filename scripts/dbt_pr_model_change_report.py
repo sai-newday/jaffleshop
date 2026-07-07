@@ -777,27 +777,23 @@ def build_comment(
                     lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
                     affected_items = _extract_affected_items(blast.parsed_json)
                     impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
-                    lines.append("  - Downstream dbt nodes impacted:")
+                    lines.append("  - Downstream dbt impacts:")
                     if affected_items:
                         for affected_item in affected_items:
                             depth_text = f"depth {affected_item.depth}" if affected_item.depth is not None else "depth unknown"
-                            lines.append(f"    - {affected_item.model} ({depth_text})")
-                    else:
-                        lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
-                    lines.append("  - Downstream dbt columns impacted:")
-                    if affected_items:
-                        column_lines: List[str] = []
-                        for affected_item in affected_items:
                             if affected_item.columns:
-                                column_lines.append(
-                                    f"- {affected_item.model}: {', '.join(affected_item.columns)}"
+                                lines.append(
+                                    f"    - {affected_item.model} ({depth_text}): {', '.join(affected_item.columns)}"
                                 )
-                        if column_lines:
-                            lines.extend([f"    {x}" for x in column_lines])
-                        else:
-                            lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
+                            else:
+                                lines.append(f"    - {affected_item.model} ({depth_text})")
                     else:
-                        lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
+                        if impacted_models:
+                            lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
+                        if impacted_columns:
+                            lines.append(
+                                f"  - Downstream columns reported: {', '.join(impacted_columns)}"
+                            )
         else:
             lines.append("- Downstream impact: (not executed)")
         lines.append("")
