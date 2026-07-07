@@ -435,9 +435,9 @@ def _collect_dict_lists(payload: object, out: List[List[dict]]) -> None:
             _collect_dict_lists(value, out)
 
 
-def _extract_summary_counts(payload: Optional[dict]) -> Tuple[Optional[int], Optional[int]]:
+def _extract_impact_details(payload: Optional[dict]) -> Tuple[List[str], List[str]]:
     if not payload:
-        return None, None
+        return [], []
 
     impacted_models: Set[str] = set()
     impacted_columns: Set[str] = set()
@@ -490,9 +490,7 @@ def _extract_summary_counts(payload: Optional[dict]) -> Tuple[Optional[int], Opt
                     if isinstance(name, str) and name.strip():
                         impacted_columns.add(name.strip())
 
-    model_count = len(impacted_models) if impacted_models else None
-    column_count = len(impacted_columns) if impacted_columns else None
-    return model_count, column_count
+    return sorted(impacted_models), sorted(impacted_columns)
 
 
 def build_impact_assessment_line(blast: BlastRadiusResult) -> str:
@@ -502,18 +500,29 @@ def build_impact_assessment_line(blast: BlastRadiusResult) -> str:
     if blast.parsed_json is None:
         return "Impact assessment unavailable: blast-radius output could not be parsed as JSON."
 
-    model_count, column_count = _extract_summary_counts(blast.parsed_json)
+    impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
+    model_count = len(impacted_models)
+    column_count = len(impacted_columns)
 
     parts: List[str] = []
-    if model_count is not None:
+    if model_count:
         parts.append(f"{model_count} downstream model(s)")
-    if column_count is not None:
+    if column_count:
         parts.append(f"{column_count} downstream column(s)")
 
     if parts:
         return "Potential impact detected on " + " and ".join(parts) + "."
 
     return "No downstream impact reported in known fields."
+
+
+def _format_preview(values: List[str], max_items: int = 15) -> str:
+    if not values:
+        return "(none reported)"
+    if len(values) <= max_items:
+        return ", ".join(values)
+    visible = ", ".join(values[:max_items])
+    return f"{visible} (+{len(values) - max_items} more)"
 
 
 def analyze_model_change(
@@ -636,6 +645,9 @@ def build_comment(
                         lines.append(f"  - Error: {blast.error_text}")
                 else:
                     lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
+                    impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
+                    lines.append(f"  - Downstream models: {_format_preview(impacted_models)}")
+                    lines.append(f"  - Downstream columns: {_format_preview(impacted_columns)}")
         else:
             lines.append("- Downstream impact: (not executed)")
         lines.append("")
