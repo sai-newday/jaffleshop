@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
 COMMENT_MARKER = "<!-- dbt-model-change-report -->"
+LINEAGE_BASE_URL = "file:///Users/n45413/dev/custom-lineage/combined-lineage/dist/index.html"
 
 
 @dataclass
@@ -583,6 +584,14 @@ def build_impact_assessment_line(blast: BlastRadiusResult) -> str:
     return "No downstream impact reported in known fields."
 
 
+def _lineage_url(unique_id: str, column: Optional[str] = None) -> str:
+    """Build a deep-link URL to the local Colibri lineage viewer for a model."""
+    params = f"?model={unique_id}"
+    if column:
+        params += f"&column={column}&focus=true"
+    return f"{LINEAGE_BASE_URL}{params}"
+
+
 def _format_preview(values: List[str], max_items: int = 15) -> str:
     if not values:
         return "(none reported)"
@@ -751,6 +760,14 @@ def build_comment(
             ]
         )
 
+        # Lineage link for the changed model itself
+        changed_cols_for_link = sorted(set(item.added_columns + item.removed_columns + item.modified_columns))
+        if changed_cols_for_link:
+            col = changed_cols_for_link[0]
+            lines.append(f"- [🔍 View lineage (column: `{col}`)]({_lineage_url(item.unique_id, col)})")
+        else:
+            lines.append(f"- [🔍 View lineage]({_lineage_url(item.unique_id)})")
+
         if item.added_columns or item.removed_columns or item.modified_columns:
             lines.append("- Column changes:")
             if item.added_columns:
@@ -782,7 +799,9 @@ def build_comment(
                             project_name = id_parts[1] if len(id_parts) >= 3 else ""
                             model_name = id_parts[2] if len(id_parts) >= 3 else affected_item.model
                             columns_str = ", ".join(affected_item.columns) if affected_item.columns else ""
-                            lines.append(f"  | {project_name} | {model_name} | {columns_str} | {depth_val} |")
+                            first_col = affected_item.columns[0] if affected_item.columns else None
+                            model_link = f"[{model_name}]({_lineage_url(affected_item.model, first_col)})"
+                            lines.append(f"  | {project_name} | {model_link} | {columns_str} | {depth_val} |")
                         lines.append("")
                     else:
                         if impacted_models:
