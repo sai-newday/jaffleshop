@@ -65,6 +65,13 @@ class BlastRadiusResult:
     error_text: str
 
 
+@dataclass
+class AffectedItem:
+    model: str
+    columns: List[str]
+    depth: Optional[int]
+
+
 def run_git(args: List[str]) -> str:
     result = subprocess.run(
         ["git"] + args,
@@ -435,6 +442,62 @@ def _collect_dict_lists(payload: object, out: List[List[dict]]) -> None:
             _collect_dict_lists(value, out)
 
 
+def _extract_project_name(model_id: str) -> Optional[str]:
+    parts = model_id.split(".")
+    if len(parts) >= 2 and parts[1].strip():
+        return parts[1].strip()
+    return None
+
+
+def _extract_affected_items(payload: Optional[dict]) -> List[AffectedItem]:
+    if not payload:
+        return []
+
+    items: Dict[str, AffectedItem] = {}
+    affected_items = payload.get("affected_items")
+    if not isinstance(affected_items, list):
+        return []
+
+    for raw_item in affected_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        model_name = raw_item.get("model")
+        if not isinstance(model_name, str) or not model_name.strip():
+            continue
+
+        columns: List[str] = []
+        raw_columns = raw_item.get("columns")
+        if isinstance(raw_columns, list):
+            columns = sorted(
+                {
+                    column_name.strip()
+                    for column_name in raw_columns
+                    if isinstance(column_name, str) and column_name.strip()
+                }
+            )
+
+        depth = raw_item.get("depth")
+        if not isinstance(depth, int):
+            depth = None
+
+        existing = items.get(model_name)
+        if existing is None:
+            items[model_name] = AffectedItem(model=model_name, columns=columns, depth=depth)
+            continue
+
+        merged_columns = sorted(set(existing.columns).union(columns))
+        merged_depth = existing.depth
+        if depth is not None and (merged_depth is None or depth < merged_depth):
+            merged_depth = depth
+        items[model_name] = AffectedItem(model=model_name, columns=merged_columns, depth=merged_depth)
+
+    return sorted(
+        items.values(),
+        key=lambda item: (item.depth is None, item.depth if item.depth is not None else 10**9, item.model),
+    )
+
+
 def _extract_impact_details(payload: Optional[dict]) -> Tuple[List[str], List[str]]:
     if not payload:
         return [], []
@@ -442,21 +505,9 @@ def _extract_impact_details(payload: Optional[dict]) -> Tuple[List[str], List[st
     impacted_models: Set[str] = set()
     impacted_columns: Set[str] = set()
 
-    affected_items = payload.get("affected_items")
-    if isinstance(affected_items, list):
-        for item in affected_items:
-            if not isinstance(item, dict):
-                continue
-
-            model_name = item.get("model")
-            if isinstance(model_name, str) and model_name.strip():
-                impacted_models.add(model_name.strip())
-
-            columns = item.get("columns")
-            if isinstance(columns, list):
-                for column_name in columns:
-                    if isinstance(column_name, str) and column_name.strip():
-                        impacted_columns.add(column_name.strip())
+    for affected_item in _extract_affected_items(payload):
+        impacted_models.add(affected_item.model)
+        impacted_columns.update(affected_item.columns)
 
     dict_lists: List[List[dict]] = []
     _collect_dict_lists(payload, dict_lists)
@@ -638,22 +689,28 @@ def build_comment(
         lines.append("No changes were detected in `models/**/*.sql` files.")
         return "\n".join(lines)
 
-    lines.append("| File changed | dbt nodes impacted | dbt columns impacted |")
-    lines.append("| :- | -: | -: |")
+    lines.append("| File changed | dbt nodes impacted | dbt projects impacted | dbt columns impacted |")
+    lines.append("| :- | -: | -: | -: |")
 
     for item in analyses:
         related_blast = blast_by_model.get(item.unique_id, [])
         impacted_models: Set[str] = set()
+        impacted_projects: Set[str] = set()
         impacted_columns: Set[str] = set()
 
         for blast in related_blast:
             if blast.success and blast.parsed_json is not None:
                 models, columns = _extract_impact_details(blast.parsed_json)
                 impacted_models.update(models)
+                impacted_projects.update(
+                    project_name
+                    for project_name in (_extract_project_name(model_id) for model_id in models)
+                    if project_name
+                )
                 impacted_columns.update(columns)
 
         lines.append(
-            f"| {item.file_path} | **{len(impacted_models)}** | **{len(impacted_columns)}** |"
+            f"| {item.file_path} | **{len(impacted_models)}** | **{len(impacted_projects)}** | **{len(impacted_columns)}** |"
         )
 
     lines.append("")
@@ -662,8 +719,31 @@ def build_comment(
     lines.append("")
 
     for item in analyses:
+        related_blast = blast_by_model.get(item.unique_id, [])
+        file_impacted_models: Set[str] = set()
+        file_impacted_projects: Set[str] = set()
+        file_impacted_columns: Set[str] = set()
+        for blast in related_blast:
+            if blast.success and blast.parsed_json is not None:
+                models, columns = _extract_impact_details(blast.parsed_json)
+                file_impacted_models.update(models)
+                file_impacted_projects.update(
+                    project_name
+                    for project_name in (_extract_project_name(model_id) for model_id in models)
+                    if project_name
+                )
+                file_impacted_columns.update(columns)
+
+        lines.append("<details>")
         lines.extend(
             [
+                (
+                    f"<summary>{item.file_path} | "
+                    f"{len(file_impacted_models)} dbt nodes | "
+                    f"{len(file_impacted_projects)} dbt projects | "
+                    f"{len(file_impacted_columns)} dbt columns</summary>"
+                ),
+                "",
                 f"### {item.file_path}",
                 f"- Model: `{item.model_name}`",
                 f"- Model unique_id: `{item.unique_id}`",
@@ -684,8 +764,6 @@ def build_comment(
             )
         else:
             lines.append("- Column changes: (none detected)")
-
-        related_blast = blast_by_model.get(item.unique_id, [])
         if related_blast:
             lines.append("- Downstream impact details:")
             for blast in related_blast:
@@ -697,13 +775,33 @@ def build_comment(
                         lines.append(f"  - Error: {blast.error_text}")
                 else:
                     lines.append(f"  - Result: {build_impact_assessment_line(blast)}")
+                    affected_items = _extract_affected_items(blast.parsed_json)
                     impacted_models, impacted_columns = _extract_impact_details(blast.parsed_json)
                     lines.append("  - Downstream dbt nodes impacted:")
-                    lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
+                    if affected_items:
+                        for affected_item in affected_items:
+                            depth_text = f"depth {affected_item.depth}" if affected_item.depth is not None else "depth unknown"
+                            lines.append(f"    - {affected_item.model} ({depth_text})")
+                    else:
+                        lines.extend([f"    {x}" for x in _format_bullet_list(impacted_models)])
                     lines.append("  - Downstream dbt columns impacted:")
-                    lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
+                    if affected_items:
+                        column_lines: List[str] = []
+                        for affected_item in affected_items:
+                            if affected_item.columns:
+                                column_lines.append(
+                                    f"- {affected_item.model}: {', '.join(affected_item.columns)}"
+                                )
+                        if column_lines:
+                            lines.extend([f"    {x}" for x in column_lines])
+                        else:
+                            lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
+                    else:
+                        lines.extend([f"    {x}" for x in _format_bullet_list(impacted_columns)])
         else:
             lines.append("- Downstream impact: (not executed)")
+        lines.append("")
+        lines.append("</details>")
         lines.append("")
 
     return "\n".join(lines)
