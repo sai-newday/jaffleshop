@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
 COMMENT_MARKER = "<!-- dbt-model-change-report -->"
-LINEAGE_BASE_URL = "file:///Users/n45413/dev/custom-lineage/combined-lineage/dist/index.html"
+LINEAGE_BASE_URL = "https://sai-newday.github.io/dbt-colibri/index.html"
 
 
 @dataclass
