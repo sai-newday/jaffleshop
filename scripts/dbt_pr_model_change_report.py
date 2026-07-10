@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
 COMMENT_MARKER = "<!-- dbt-model-change-report -->"
+COMMENT_PART_MARKER_PREFIX = "<!-- dbt-model-change-report-part:"
+COMMENT_MAX_BODY_LENGTH = 60000
 LINEAGE_BASE_URL = "https://sai-newday.github.io/dbt-colibri/index.html"
 
 
@@ -819,6 +821,112 @@ def build_comment(
     return "\n".join(lines)
 
 
+def split_comment_body(body: str, max_length: int = COMMENT_MAX_BODY_LENGTH) -> List[str]:
+    if len(body) <= max_length:
+        return [body]
+
+    detail_blocks = list(re.finditer(r"<details>.*?</details>\n?", body, flags=re.DOTALL))
+    sections: List[str] = []
+
+    if detail_blocks:
+        prefix_end = detail_blocks[0].start()
+        prefix = body[:prefix_end]
+        if prefix.strip():
+            sections.append(prefix.rstrip())
+
+        for block in detail_blocks:
+            sections.append(block.group(0).rstrip())
+
+        suffix = body[detail_blocks[-1].end() :]
+        if suffix.strip():
+            sections.append(suffix.lstrip())
+    else:
+        sections = [body]
+
+    def split_large_section(section: str) -> List[str]:
+        if len(section) <= max_length:
+            return [section]
+
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+
+        for line in section.splitlines(keepends=True):
+            if len(line) > max_length:
+                if current:
+                    chunks.append("".join(current).rstrip("\n"))
+                    current = []
+                    current_len = 0
+                start = 0
+                while start < len(line):
+                    chunks.append(line[start : start + max_length].rstrip("\n"))
+                    start += max_length
+                continue
+
+            if current_len + len(line) > max_length and current:
+                chunks.append("".join(current).rstrip("\n"))
+                current = [line]
+                current_len = len(line)
+                continue
+
+            current.append(line)
+            current_len += len(line)
+
+        if current:
+            chunks.append("".join(current).rstrip("\n"))
+
+        return chunks
+
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for section in sections:
+        section_parts = split_large_section(section)
+        for part in section_parts:
+            if current and current_len + len(part) + 2 > max_length:
+                chunks.append("\n\n".join(current).rstrip())
+                current = []
+                current_len = 0
+
+            current.append(part)
+            current_len += len(part) + (2 if len(current) > 1 else 0)
+
+    if current:
+        chunks.append("\n\n".join(current).rstrip())
+
+    return chunks
+
+
+def build_comment_parts(body: str) -> List[str]:
+    parts = split_comment_body(body)
+    if len(parts) == 1:
+        return [body]
+
+    total_parts = len(parts)
+    wrapped_parts: List[str] = []
+    for idx, part in enumerate(parts, start=1):
+        wrapped_parts.append(
+            "\n".join(
+                [
+                    COMMENT_MARKER,
+                    f"{COMMENT_PART_MARKER_PREFIX}{idx}/{total_parts} -->",
+                    "",
+                    part,
+                ]
+            )
+        )
+
+    return wrapped_parts
+
+
+def _extract_comment_part_index(body: str) -> int:
+    match = re.search(r"<!-- dbt-model-change-report-part:(\d+)/(\d+) -->", body)
+    if match:
+        return int(match.group(1))
+    return 1
+
+
 def github_api_request(method: str, url: str, token: str, data: Optional[dict] = None) -> dict:
     payload = None
     headers = {
@@ -840,23 +948,32 @@ def github_api_request(method: str, url: str, token: str, data: Optional[dict] =
         raise RuntimeError(f"GitHub API error {exc.code}: {detail}") from exc
 
 
-def upsert_pr_comment(repository: str, pr_number: str, body: str, token: str) -> None:
+def upsert_pr_comment(repository: str, pr_number: str, body_parts: List[str], token: str) -> None:
     comments_url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments"
     comments = github_api_request("GET", comments_url, token)
 
-    existing = None
-    for c in comments:
-        if COMMENT_MARKER in c.get("body", ""):
-            existing = c
-            break
+    existing = [
+        c
+        for c in comments
+        if COMMENT_MARKER in c.get("body", "")
+    ]
+    existing.sort(key=lambda c: (_extract_comment_part_index(c.get("body", "")), c.get("id", 0)))
 
-    if existing:
-        update_url = f"https://api.github.com/repos/{repository}/issues/comments/{existing['id']}"
-        github_api_request("PATCH", update_url, token, {"body": body})
-        print(f"Updated existing PR comment: {existing['id']}")
-    else:
-        github_api_request("POST", comments_url, token, {"body": body})
-        print("Created new PR comment")
+    desired_count = len(body_parts)
+
+    for idx, body_part in enumerate(body_parts):
+        if idx < len(existing):
+            update_url = f"https://api.github.com/repos/{repository}/issues/comments/{existing[idx]['id']}"
+            github_api_request("PATCH", update_url, token, {"body": body_part})
+            print(f"Updated existing PR comment: {existing[idx]['id']}")
+        else:
+            github_api_request("POST", comments_url, token, {"body": body_part})
+            print("Created new PR comment")
+
+    for extra in existing[desired_count:]:
+        delete_url = f"https://api.github.com/repos/{repository}/issues/comments/{extra['id']}"
+        github_api_request("DELETE", delete_url, token)
+        print(f"Deleted stale PR comment: {extra['id']}")
 
 
 def main() -> int:
@@ -910,7 +1027,8 @@ def main() -> int:
     ]
 
     body = build_comment(analyses, changed_files, blast_results)
-    upsert_pr_comment(repository, pr_number, body, token)
+    body_parts = build_comment_parts(body)
+    upsert_pr_comment(repository, pr_number, body_parts, token)
 
     summary = {
         "changed_files": len(changed_files),
